@@ -11,7 +11,7 @@ import openpyxl
 
 # --- Streamlit Page Configuration ---
 st.set_page_config(
-    page_title="PO Processing Agent",
+    page_title="Invoice Processing Agent",
     page_icon="📋",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -54,13 +54,13 @@ def lookup_master_data(file_name: str, lookup_column: str, lookup_value: str, re
         st.error(f"❌ Error looking up data in '{file_name}': {e}")
         return f"Error: {e}"
 
-def generate_output_csv(po_data_json: str, output_filename: str) -> tuple:
+def generate_output_csv(invoice_data_json: str, output_filename: str) -> tuple:
     """
-    Generates a final CSV file from a JSON object of processed PO data.
+    Generates a final CSV file from a JSON object of processed invoice data.
     Returns tuple of (success_message, csv_data, dataframe)
     """
     try:
-        data = json.loads(po_data_json)
+        data = json.loads(invoice_data_json)
         df = pd.DataFrame([data])
         
         # Convert to CSV string
@@ -141,8 +141,8 @@ def preview_excel_structure(uploaded_files):
 
 # --- Main Streamlit App ---
 def main():
-    st.title("📋 PO Processing Agent with Gemini AI")
-    st.markdown("Upload your documents and master data Excel files to automatically generate procurement CSV output.")
+    st.title("📋 Invoice Processing Agent with Gemini AI")
+    st.markdown("Upload your Invoice, Jira ticket, optional Contract, and master data Excel files to automatically generate procurement CSV output.")
     
     # Sidebar for configuration
     st.sidebar.header("🔧 Configuration")
@@ -164,7 +164,8 @@ def main():
     
     # Model selection
     model_options = [
-        "gemini-2.5-pro"
+        "gemini-2.5-pro",
+        "gemini-2.5-flash"
     ]
     selected_model = st.sidebar.selectbox(
         "Select Gemini Model",
@@ -179,15 +180,8 @@ def main():
     with col1:
         st.header("📄 Document Upload")
         
-        # File uploaders for the three required PDFs
+        # File uploaders for the required documents
         st.subheader("Required Documents")
-        po_file = st.file_uploader(
-            "Purchase Order PDF", 
-            type=['pdf'], 
-            key="po_file",
-            help="Upload the Purchase Order document"
-        )
-        
         invoice_file = st.file_uploader(
             "Tax Invoice PDF", 
             type=['pdf'], 
@@ -202,10 +196,22 @@ def main():
             help="Upload the Jira Ticket document"
         )
         
+        st.subheader("Optional Documents")
+        contract_file = st.file_uploader(
+            "Contract PDF (Optional)", 
+            type=['pdf'], 
+            key="contract_file",
+            help="Upload the Contract document (if available)"
+        )
+        
         # Show uploaded file info
-        uploaded_pdfs = [f for f in [po_file, invoice_file, jira_file] if f is not None]
-        if uploaded_pdfs:
-            st.info(f"📊 {len(uploaded_pdfs)}/3 PDF documents uploaded")
+        required_files = [f for f in [invoice_file, jira_file] if f is not None]
+        optional_files = [f for f in [contract_file] if f is not None]
+        
+        if required_files:
+            st.info(f"📊 {len(required_files)}/2 required documents uploaded")
+        if optional_files:
+            st.info(f"📎 {len(optional_files)} optional document uploaded")
     
     with col2:
         st.header("📊 Master Data Files")
@@ -262,8 +268,8 @@ def main():
     
     if process_button:
         # Validation
-        if not all([po_file, invoice_file, jira_file]):
-            st.error("❌ Please upload all three required PDF documents.")
+        if not all([invoice_file, jira_file]):
+            st.error("❌ Please upload both required documents: Tax Invoice and Jira Ticket.")
             return
         
         if not master_data_files:
@@ -293,22 +299,26 @@ def main():
             # Create temporary files for the PDFs
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Save uploaded files to temporary directory
-                po_path = os.path.join(temp_dir, po_file.name)
                 invoice_path = os.path.join(temp_dir, invoice_file.name)
                 jira_path = os.path.join(temp_dir, jira_file.name)
                 
-                with open(po_path, "wb") as f:
-                    f.write(po_file.getvalue())
                 with open(invoice_path, "wb") as f:
                     f.write(invoice_file.getvalue())
                 with open(jira_path, "wb") as f:
                     f.write(jira_file.getvalue())
                 
+                # Handle optional contract file
+                contract_gemini_file = None
+                if contract_file:
+                    contract_path = os.path.join(temp_dir, contract_file.name)
+                    with open(contract_path, "wb") as f:
+                        f.write(contract_file.getvalue())
+                    contract_gemini_file = genai.upload_file(path=contract_path)
+                
                 # Upload files to Gemini
                 status_text.text("📤 Uploading files to Gemini...")
                 progress_bar.progress(50)
                 
-                po_gemini_file = genai.upload_file(path=po_path)
                 invoice_gemini_file = genai.upload_file(path=invoice_path)
                 jira_gemini_file = genai.upload_file(path=jira_path)
                 
@@ -316,13 +326,13 @@ def main():
                 def lookup_tool(file_name: str, lookup_column: str, lookup_value: str, return_column: str) -> str:
                     return lookup_master_data(file_name, lookup_column, lookup_value, return_column, master_data)
                 
-                def generate_csv_tool(po_data_json: str, output_filename: str) -> str:
-                    result, csv_data, df = generate_output_csv(po_data_json, output_filename)
+                def generate_csv_tool(invoice_data_json: str, output_filename: str) -> str:
+                    result, csv_data, df = generate_output_csv(invoice_data_json, output_filename)
                     if csv_data:
                         st.session_state['csv_output'] = csv_data
                         st.session_state['output_df'] = df
                         st.session_state['output_filename'] = output_filename
-                        st.session_state['processed_data'] = json.loads(po_data_json)
+                        st.session_state['processed_data'] = json.loads(invoice_data_json)
                     return result
                 
                 model = genai.GenerativeModel(
@@ -347,67 +357,93 @@ def main():
                 
                 available_files = ", ".join(available_files_list)
                 
-                # Enhanced prompt with better instructions
+                # Enhanced prompt for invoice processing
+                contract_info = "A Contract document is also available for reference." if contract_file else "No contract document is provided."
+                
                 prompt = f"""
                 **ROLE & GOAL:**
-                You are an AI agent specializing in procurement data processing. Your task is to extract information from three provided documents (a Purchase Order, a Tax Invoice, and a Jira Ticket), use the `lookup_tool` function to find corresponding codes from master data files, and then call the `generate_csv_tool` function with the final, complete data.
+                You are an AI agent specializing in procurement data processing. Your task is to extract information from the provided documents (a Tax Invoice and a Jira Ticket{', and optionally a Contract' if contract_file else ''}), use the `lookup_tool` function to find corresponding codes from master data files, and then call the `generate_csv_tool` function with the final, complete data.
+
+                **AVAILABLE DOCUMENTS:**
+                - Tax Invoice PDF (required)
+                - Jira Ticket PDF (required)
+                {contract_info}
 
                 **AVAILABLE MASTER DATA FILES:**
                 {available_files}
                 
                 **NOTE:** If an Excel file has multiple sheets, use the format `filename.xlsx_SheetName` to reference specific sheets.
 
+                **CRITICAL REQUIREMENTS:**
+                1. **Use VENDOR CODE, not vendor name** - Extract the vendor code from the invoice
+                2. **Format dates as DD.MM.YYYY** (e.g., 19.07.2025)
+                3. **Use 18% GST Tax Code** - Look up the appropriate tax code for 18% GST from master data (I4 for 18% input credit)
+                4. **Generate purchase order number** - Create a PO number based on the invoice and workflow information
+
                 **INSTRUCTIONS:**
-                1. **Extract Data:** Carefully read all three documents to gather the initial information including:
-                   - PO Number, Vendor details, dates, amounts
-                   - Service descriptions, tax information
-                   - Requestor/approver information from Jira
+                1. **Extract Data:** Carefully read all provided documents to gather:
+                   - Invoice details: vendor CODE, amounts, dates, tax information, service descriptions
+                   - Jira information: requestor/approver information, project details
+                   - Contract details (if available): agreement terms, validity dates
                 
-                2. **Enrich Data with Tools:** Use the `lookup_tool` function to find all necessary codes:
-                   - GL Account (based on the service description)
-                   - Tax Code (based on the invoice's tax percentages)  
-                   - Requestor ID (based on the approver's/requester's name from the Jira ticket)
-                   - Any other codes needed from the master files
-                   - When calling lookup_tool, use the exact file names as shown in the available files list above
+                2. **Enrich Data with Tools:** Use the `lookup_tool` function to find:
+                   - GL Account (based on service description)
+                   - Tax Code for 18% GST (should be I4 for input credit)
+                   - Requestor ID (based on approver's/requester's name from Jira)
+                   - Any other required codes from master files
                 
-                3. **Construct Final Data:** Assemble all the extracted and looked-up data into a single, structured JSON object matching the schema below.
+                3. **Construct Final Data:** Assemble data for procurement processing
                 
                 4. **Generate CSV:** Call the `generate_csv_tool` function with the completed JSON data.
 
-                **OUTPUT JSON SCHEMA TO POPULATE:**
+                **OUTPUT JSON SCHEMA:**
                 {{
                   "Document Type": "ZNID",
                   "PO Number": "",
-                  "Line Item Number": "10", 
+                  "Line Item Number": "10",
                   "Vendor": "",
                   "Document Date": "",
                   "Payment Terms": "P000",
                   "Purchasing Organisation": "1001",
                   "Purchase Group": "S05",
-                  "Company Code": "1001", 
-                  "Validity Start Date": "19.07.2025",
-                  "Validity End Date": "19.07.2026",
-                  "Short Text": "Housekeeping Service",
+                  "Invoice": "",
+                  "SAP Database": "",
+                  "Jira": "",
+                  "Agreement": "",
+                  "Company Code": "1001",
+                  "Validity Start Date": "",
+                  "Validity End Date": "",
+                  "WO Header Text": "",
+                  "Account Assignment": "",
+                  "Item Category": "",
+                  "Short Text": "",
+                  "Delivery Date": "",
                   "Plant": "DS01",
-                  "Service Number": "21000020",
-                  "Service Quantity": "1",
+                  "Requisitioner": "",
+                  "Service Number": "",
+                  "Service Quantity": "",
                   "Gross Price": "",
-                  "Cost Center": "DSG0010001",
+                  "Cost Center": "",
                   "WBS": "",
                   "Tax Code": "",
-                  "Material Group": "MG021", 
+                  "Material Group": "",
+                  "no of days": "",
                   "Requestor": "",
-                  "Control Code": "999433",
+                  "Control Code": "",
                   "GL Account": "",
-                  "UOM": "AU"
+                  "UOM": "",
+                  "Order Number": "",
+                  "Text 1": ""
                 }}
 
                 **IMPORTANT NOTES:**
-                - Extract actual values from the documents where possible
-                - Use lookup_tool to find codes that match the extracted information
-                - If a lookup fails, indicate this in your response but continue processing
-                - Ensure all monetary values are properly formatted
-                - Use the custom filename if processing is successful
+                - Use VENDOR CODE (e.g., 101347) NOT vendor name
+                - For 18% GST, use tax code I4 (GST Input (CGST+SGST) 18% Input Credit)
+                - Format dates as DD.MM.YYYY
+                - Extract actual values from documents where possible
+                - Generate a logical PO number based on invoice and workflow information
+                - If contract is available, use it for agreement details and validity dates
+                - If lookup fails, use reasonable defaults but indicate in response
 
                 Begin the process now.
                 """
@@ -417,7 +453,13 @@ def main():
                 progress_bar.progress(80)
                 
                 chat = model.start_chat(enable_automatic_function_calling=True)
-                response = chat.send_message([prompt, po_gemini_file, invoice_gemini_file, jira_gemini_file])
+                
+                # Prepare documents list for processing
+                documents_to_process = [prompt, invoice_gemini_file, jira_gemini_file]
+                if contract_gemini_file:
+                    documents_to_process.append(contract_gemini_file)
+                
+                response = chat.send_message(documents_to_process)
                 
                 progress_bar.progress(100)
                 status_text.text("✅ Processing complete!")
@@ -497,34 +539,37 @@ def main():
         **Step-by-step process:**
         
         1. **Configure API:** Enter your Gemini API key in the sidebar
-        2. **Upload PDFs:** Add your three required PDF documents:
-           - Purchase Order PDF
-           - Tax Invoice PDF  
+        2. **Upload Required PDFs:** Add your two required PDF documents:
+           - Tax Invoice PDF
            - Jira Ticket PDF
-        3. **Upload Master Data:** Add your Excel files containing lookup data
-        4. **Configure Options:** Set advanced options if needed
-        5. **Process:** Click 'Process Documents' to start AI processing
-        6. **Download:** Get your generated CSV and JSON files
+        3. **Upload Optional PDF:** Optionally add:
+           - Contract PDF (for agreement details)
+        4. **Upload Master Data:** Add your Excel files containing lookup data
+        5. **Configure Options:** Set advanced options if needed
+        6. **Process:** Click 'Process Documents' to start AI processing
+        7. **Download:** Get your generated CSV and JSON files
         """)
     
     with tab2:
         st.markdown("""
         **Required PDF Documents:**
-        - 📄 **Purchase Order:** Contains PO number, vendor, dates, amounts
-        - 🧾 **Tax Invoice:** Contains tax information and pricing details  
-        - 🎫 **Jira Ticket:** Contains requestor/approver information
+        - 🧾 **Tax Invoice:** Contains vendor CODE, amounts, tax information, service descriptions
+        - 🎫 **Jira Ticket:** Contains requestor/approver information and project details
+        
+        **Optional PDF Documents:**
+        - 📄 **Contract:** Contains agreement terms, validity dates, and contract details
         
         **Master Data Excel Files:**
         - 📊 **GL Account Codes:** Service descriptions → GL codes
-        - 💰 **Tax Codes:** Tax percentages → Tax codes
+        - 💰 **Tax Codes:** Tax percentages → Tax codes (I4 for 18% GST)
         - 👤 **Requestor Data:** Names → Requestor IDs
         - 📈 **Other Reference Data:** Any additional lookup tables
         
-        **Excel File Support:**
-        - ✅ `.xlsx` and `.xls` formats supported
-        - ✅ Single sheet: Reference as `filename.xlsx`
-        - ✅ Multiple sheets: Reference as `filename.xlsx_SheetName`
-        - ✅ Automatic column name cleaning
+        **Key Requirements:**
+        - ✅ Use vendor CODE (e.g., 101347) not vendor name
+        - ✅ 18% GST should map to tax code I4
+        - ✅ Format dates as DD.MM.YYYY
+        - ✅ Generate logical PO number from invoice and workflow
         """)
     
     with tab3:
@@ -539,16 +584,20 @@ def main():
         - Ensure PDF files are not corrupted or password-protected
         - Check Excel files have proper column headers
         - Verify file sizes are within limits
+        - Contract file is optional - processing will work without it
         
         **🔍 Lookup Issues:**
         - Enable debug mode to see detailed processing information
         - Check column names in your Excel files match expectations
-        - Ensure lookup values exist in your master data
+        - Ensure 18% GST maps to tax code I4 in your master data
+        - Verify vendor codes exist in master data
         
         **💡 Tips:**
         - Use clear, descriptive column names in Excel files
         - Test with smaller files first
         - Keep master data organized in separate sheets by type
+        - Ensure tax code master data includes I4 for 18% GST
+        - Contract document provides additional context but is not required
         """)
 
 if __name__ == "__main__":
